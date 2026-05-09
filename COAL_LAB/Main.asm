@@ -22,8 +22,9 @@ IDM_FILE_SAVE       EQU 1002
 IDM_FILE_EXIT       EQU 1003    
 IDM_FILTER_NEG      EQU 2001    
 IDM_FILTER_GRAY     EQU 2002    
-IDM_EDIT_ROTATE     EQU 3001    ; NEW: Rotate ID
-IDM_EDIT_CROP       EQU 3002    ; NEW: Crop ID
+IDM_EDIT_FLIP_H     EQU 3001    ; NEW: Horizontal Flip
+IDM_EDIT_FLIP_V     EQU 3002    ; NEW: Vertical Flip
+IDM_EDIT_CROP       EQU 3003    
 
 OFN_FILEMUSTEXIST   EQU 00001000h
 OFN_PATHMUSTEXIST   EQU 00000800h
@@ -36,7 +37,6 @@ CREATE_ALWAYS       EQU 2
 FILE_ATTRIBUTE_NORMAL EQU 80h
 INVALID_HANDLE_VALUE  EQU -1
 
-; NEW: Window Positioning Constants
 SWP_NOMOVE          EQU 2
 SWP_NOZORDER        EQU 4
 
@@ -110,8 +110,6 @@ SetMenu          PROTO :DWORD, :DWORD
 GetOpenFileNameA PROTO :DWORD
 GetSaveFileNameA PROTO :DWORD       
 GetFileSize      PROTO :DWORD, :DWORD
-
-; NEW: Prototype to dynamically resize the window!
 SetWindowPos     PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 
 SetDIBitsToDevice PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
@@ -133,22 +131,31 @@ wc          GUI_WNDCLASS <>
 globalInst  DWORD ?          
 
 fileMenuStr BYTE "File",0
-editMenuStr BYTE "Edit",0            ; NEW: Edit Menu
+editMenuStr BYTE "Edit",0            
 filtMenuStr BYTE "Filters",0
 openStr     BYTE "Open Image...",0
 saveStr     BYTE "Save Image As...",0
 exitStr     BYTE "Exit",0
 negStr      BYTE "Apply Negative / Invert",0
 grayStr     BYTE "Apply Grayscale (B&W)",0   
-rotStr      BYTE "Rotate 90 Degrees",0       ; NEW
-cropStr     BYTE "Crop Image",0              ; NEW
+flipHStr    BYTE "Flip Horizontally",0       
+flipVStr    BYTE "Flip Vertically",0         
+cropStr     BYTE "Crop Image (Manual)",0     
 
 ofn         GUI_OPENFILENAME <>
 szFileName  BYTE 260 DUP(0)      
 szFilter    BYTE "Bitmap Files (*.bmp)",0,"*.bmp",0,"All Files (*.*)",0,"*.*",0,0
 saveSuccess BYTE "Image successfully saved to disk!",0
 msgTitle    BYTE "IMASM Notice",0
-buildMsg    BYTE "Architectural choice required! Do we use mouse dragging or manual numbers?",0
+
+; --- NEW: The Crop Guide Message ---
+cropGuide   BYTE "CROP TOOL ARCHITECTURE INITIATED", 13, 10, 13, 10
+            BYTE "To crop in pure Assembly, we must calculate exact memory offsets.", 13, 10
+            BYTE "1. We will request an X and Y start coordinate.", 13, 10
+            BYTE "2. We jump to that exact pixel: Offset = (Y * RowSize) + (X * 3).", 13, 10
+            BYTE "3. We allocate a NEW memory block.", 13, 10
+            BYTE "4. We copy the desired width/height over to the new block.", 13, 10, 13, 10
+            BYTE "Prepare to build the custom Win32 Input Dialogue to capture these numbers!",0
 
 hFile       DWORD ?                 
 bytesRead   DWORD ?                 
@@ -160,6 +167,7 @@ pPixels     DWORD ?
 imgWidth    DWORD ?                 
 imgHeight   DWORD ?                 
 pixelOffset DWORD ?
+rowSize     DWORD ?                 ; NEW: Stores width in bytes + padding
 
 ; =========================================================================
 ; 4. CODE SECTION
@@ -198,9 +206,7 @@ AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWOR
 
     INVOKE RegisterClassA, ADDR wc
 
-    ; Start with a small default window
-    INVOKE CreateWindowExA,
-        0, ADDR className, ADDR windowTitle, WS_OVERLAPPEDWINDOW,        
+    INVOKE CreateWindowExA, 0, ADDR className, ADDR windowTitle, WS_OVERLAPPEDWINDOW,        
         CW_USEDEFAULT, CW_USEDEFAULT, 400, 300, 0, 0, instHandle, 0
     mov mainHwnd, eax
 
@@ -217,7 +223,8 @@ AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWOR
     INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_SAVE, ADDR saveStr
     INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_EXIT, ADDR exitStr
     
-    INVOKE AppendMenuA, hEditMenu, MF_STRING, IDM_EDIT_ROTATE, ADDR rotStr
+    INVOKE AppendMenuA, hEditMenu, MF_STRING, IDM_EDIT_FLIP_H, ADDR flipHStr
+    INVOKE AppendMenuA, hEditMenu, MF_STRING, IDM_EDIT_FLIP_V, ADDR flipVStr
     INVOKE AppendMenuA, hEditMenu, MF_STRING, IDM_EDIT_CROP, ADDR cropStr
     
     INVOKE AppendMenuA, hFiltMenu, MF_STRING, IDM_FILTER_NEG, ADDR negStr
@@ -268,12 +275,10 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                 .IF eax != INVALID_HANDLE_VALUE
                     INVOKE GetFileSize, hFile, 0
                     mov fileSize, eax
-
                     INVOKE GetProcessHeap
                     mov hHeap, eax
                     INVOKE HeapAlloc, hHeap, 8, fileSize
                     mov pHeap, eax
-
                     INVOKE ReadFile, hFile, pHeap, fileSize, ADDR bytesRead, 0
                     INVOKE CloseHandle, hFile
 
@@ -288,25 +293,25 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                     mov eax, pHeap
                     add eax, pixelOffset
                     mov pPixels, eax
-                    
                     mov eax, pHeap
                     add eax, 14
                     mov pHeader, eax
 
-                    ; =====================================================================
-                    ; NEW: DYNAMIC WINDOW RESIZING
-                    ; =====================================================================
-                    ; We want the window to be the image width + 40px for margins
+                    ; --- CALCULATE PADDED ROW SIZE ---
+                    ; RowSize = (Width * 3 + 3) AND ~3
+                    mov eax, imgWidth
+                    mov ebx, 3
+                    mul ebx
+                    add eax, 3
+                    and eax, 0FFFFFFFCh
+                    mov rowSize, eax
+
+                    ; Resize Window
                     mov eax, imgWidth
                     add eax, 40
-                    
-                    ; We want the height to be image height + 80px (for title bar + menus)
                     mov ebx, imgHeight
                     add ebx, 80
-                    
-                    ; Resize it! (6 = SWP_NOMOVE | SWP_NOZORDER, meaning don't move it, just resize)
                     INVOKE SetWindowPos, winHandle, 0, 0, 0, eax, ebx, 6
-                    ; =====================================================================
 
                     INVOKE RenderImage, winHandle
                 .ENDIF
@@ -327,7 +332,6 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                 .IF eax != 0
                     INVOKE CreateFileA, ADDR szFileName, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0
                     mov hFile, eax
-                    
                     .IF eax != INVALID_HANDLE_VALUE
                         INVOKE WriteFile, hFile, pHeap, fileSize, ADDR bytesRead, 0
                         INVOKE CloseHandle, hFile
@@ -336,26 +340,121 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                 .ENDIF
             .ENDIF
             
-        ; --- EDIT MENU PLACEHOLDERS ---
-        .ELSEIF eax == IDM_EDIT_ROTATE
-            INVOKE MessageBoxA, winHandle, ADDR buildMsg, ADDR msgTitle, 0
-            
+        ; =====================================================================
+        ; NEW: VERTICAL FLIP (Row Swapping)
+        ; =====================================================================
+        .ELSEIF eax == IDM_EDIT_FLIP_V
+            .IF pHeap != 0
+                ; ESI = Top Row, EDI = Bottom Row
+                mov esi, pPixels
+                
+                mov eax, imgHeight
+                dec eax
+                mov ebx, rowSize
+                mul ebx
+                add eax, pPixels
+                mov edi, eax    ; EDI now points to the last row
+                
+                mov ecx, imgHeight
+                shr ecx, 1      ; Loop Height/2 times
+                
+            VertOuterLoop:
+                push ecx        ; Save outer loop counter
+                mov ecx, rowSize; Inner loop runs for every byte in the row
+                push esi        ; Save row start pointers
+                push edi
+                
+                VertInnerLoop:
+                    mov al, [esi]   ; Swap byte at ESI with byte at EDI
+                    mov bl, [edi]
+                    mov [esi], bl
+                    mov [edi], al
+                    inc esi
+                    inc edi
+                    loop VertInnerLoop
+                    
+                pop edi         ; Restore row start pointers
+                pop esi
+                add esi, rowSize; Move Top row DOWN
+                sub edi, rowSize; Move Bottom row UP
+                
+                pop ecx         ; Restore outer counter
+                dec ecx
+                jnz VertOuterLoop
+                
+                INVOKE RenderImage, winHandle
+            .ENDIF
+
+        ; =====================================================================
+        ; NEW: HORIZONTAL FLIP (Pixel Swapping)
+        ; =====================================================================
+        .ELSEIF eax == IDM_EDIT_FLIP_H
+            .IF pHeap != 0
+                mov edx, imgHeight ; Use EDX for outer loop (Rows)
+                mov esi, pPixels   ; Start at bottom-left pixel
+                
+            HorizOuterLoop:
+                push edx           ; Save row counter
+                
+                ; Calculate pointer to right-most pixel of this row
+                mov eax, imgWidth
+                dec eax
+                mov ebx, 3
+                mul ebx            ; EAX = (Width-1) * 3
+                add eax, esi
+                mov ebx, eax       ; EBX = Right Pixel Pointer
+                mov edi, esi       ; EDI = Left Pixel Pointer
+                
+                mov ecx, imgWidth
+                shr ecx, 1         ; Loop Width/2 times
+                
+                HorizInnerLoop:
+                    ; Swap Blue, Green, Red bytes
+                    mov al, [edi]
+                    mov ah, [ebx]
+                    mov [edi], ah
+                    mov [ebx], al
+                    
+                    mov al, [edi+1]
+                    mov ah, [ebx+1]
+                    mov [edi+1], ah
+                    mov [ebx+1], al
+                    
+                    mov al, [edi+2]
+                    mov ah, [ebx+2]
+                    mov [edi+2], ah
+                    mov [ebx+2], al
+                    
+                    add edi, 3      ; Move Left pixel right
+                    sub ebx, 3      ; Move Right pixel left
+                    dec ecx
+                    jnz HorizInnerLoop
+                    
+                add esi, rowSize    ; Jump to the next row
+                pop edx             ; Restore row counter
+                dec edx
+                jnz HorizOuterLoop
+                
+                INVOKE RenderImage, winHandle
+            .ENDIF
+
+        ; =====================================================================
+        ; NEW: CROP GUIDE MESSAGE
+        ; =====================================================================
         .ELSEIF eax == IDM_EDIT_CROP
-            INVOKE MessageBoxA, winHandle, ADDR buildMsg, ADDR msgTitle, 0
+            INVOKE MessageBoxA, winHandle, ADDR cropGuide, ADDR msgTitle, 0
 
         .ELSEIF eax == IDM_FILTER_NEG
             .IF pHeap != 0
                 mov ecx, fileSize
                 sub ecx, pixelOffset
                 mov esi, pPixels
-                
             InvertLoop:
                 mov al, BYTE PTR [esi]   
                 not al                   
                 mov BYTE PTR [esi], al   
                 inc esi                  
                 loop InvertLoop          
-                
                 INVOKE RenderImage, winHandle
             .ENDIF
 
@@ -363,35 +462,27 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
             .IF pHeap != 0
                 mov ecx, fileSize
                 sub ecx, pixelOffset
-                
                 mov eax, ecx
                 mov edx, 0
                 mov ebx, 3
                 div ebx
                 mov ecx, eax    
-
                 mov esi, pPixels
-                
             GrayLoop:
                 movzx ax, BYTE PTR [esi]      
                 movzx bx, BYTE PTR [esi+1]    
                 movzx dx, BYTE PTR [esi+2]    
-                
                 add ax, bx
                 add ax, dx
-                
                 mov bl, 3
                 div bl          
-                
                 mov BYTE PTR [esi], al
                 mov BYTE PTR [esi+1], al
                 mov BYTE PTR [esi+2], al
-                
                 add esi, 3
                 dec ecx
                 cmp ecx, 0
                 jg GrayLoop
-                
                 INVOKE RenderImage, winHandle
             .ENDIF
 
@@ -414,14 +505,9 @@ AppWndProc ENDP
 
 RenderImage PROC winHandle:DWORD
     LOCAL hdc:DWORD
-    
     INVOKE GetDC, winHandle
     mov hdc, eax
-    
-    INVOKE SetDIBitsToDevice, 
-        hdc, 20, 20, imgWidth, imgHeight, 0, 0, 0, imgHeight, 
-        pPixels, pHeader, 0                   
-        
+    INVOKE SetDIBitsToDevice, hdc, 20, 20, imgWidth, imgHeight, 0, 0, 0, imgHeight, pPixels, pHeader, 0                   
     INVOKE ReleaseDC, winHandle, hdc
     ret
 RenderImage ENDP
