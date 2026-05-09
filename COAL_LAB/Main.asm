@@ -21,18 +21,24 @@ IDM_FILE_OPEN       EQU 1001
 IDM_FILE_SAVE       EQU 1002    
 IDM_FILE_EXIT       EQU 1003    
 IDM_FILTER_NEG      EQU 2001    
-IDM_FILTER_GRAY     EQU 2002    ; NEW: Grayscale Filter ID
+IDM_FILTER_GRAY     EQU 2002    
+IDM_EDIT_ROTATE     EQU 3001    ; NEW: Rotate ID
+IDM_EDIT_CROP       EQU 3002    ; NEW: Crop ID
 
 OFN_FILEMUSTEXIST   EQU 00001000h
 OFN_PATHMUSTEXIST   EQU 00000800h
-OFN_OVERWRITEPROMPT EQU 00000002h ; NEW: Warns if overwriting a file
+OFN_OVERWRITEPROMPT EQU 00000002h 
 
 GENERIC_READ        EQU 80000000h
-GENERIC_WRITE       EQU 40000000h ; NEW: Permission to write to disk
+GENERIC_WRITE       EQU 40000000h 
 OPEN_EXISTING       EQU 3
-CREATE_ALWAYS       EQU 2         ; NEW: Creates a new file
+CREATE_ALWAYS       EQU 2         
 FILE_ATTRIBUTE_NORMAL EQU 80h
 INVALID_HANDLE_VALUE  EQU -1
+
+; NEW: Window Positioning Constants
+SWP_NOMOVE          EQU 2
+SWP_NOZORDER        EQU 4
 
 GUI_WNDCLASS STRUCT
   style         DWORD ?
@@ -102,8 +108,11 @@ AppendMenuA      PROTO :DWORD, :DWORD, :DWORD, :DWORD
 SetMenu          PROTO :DWORD, :DWORD
 
 GetOpenFileNameA PROTO :DWORD
-GetSaveFileNameA PROTO :DWORD       ; NEW: Save File Dialog Prototype
+GetSaveFileNameA PROTO :DWORD       
 GetFileSize      PROTO :DWORD, :DWORD
+
+; NEW: Prototype to dynamically resize the window!
+SetWindowPos     PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 
 SetDIBitsToDevice PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 GetDC            PROTO :DWORD
@@ -124,18 +133,22 @@ wc          GUI_WNDCLASS <>
 globalInst  DWORD ?          
 
 fileMenuStr BYTE "File",0
+editMenuStr BYTE "Edit",0            ; NEW: Edit Menu
 filtMenuStr BYTE "Filters",0
 openStr     BYTE "Open Image...",0
 saveStr     BYTE "Save Image As...",0
 exitStr     BYTE "Exit",0
 negStr      BYTE "Apply Negative / Invert",0
-grayStr     BYTE "Apply Grayscale (B&W)",0   ; NEW: Menu Text
+grayStr     BYTE "Apply Grayscale (B&W)",0   
+rotStr      BYTE "Rotate 90 Degrees",0       ; NEW
+cropStr     BYTE "Crop Image",0              ; NEW
 
 ofn         GUI_OPENFILENAME <>
 szFileName  BYTE 260 DUP(0)      
 szFilter    BYTE "Bitmap Files (*.bmp)",0,"*.bmp",0,"All Files (*.*)",0,"*.*",0,0
 saveSuccess BYTE "Image successfully saved to disk!",0
-msgTitle    BYTE "IMASM Event",0
+msgTitle    BYTE "IMASM Notice",0
+buildMsg    BYTE "Architectural choice required! Do we use mouse dragging or manual numbers?",0
 
 hFile       DWORD ?                 
 bytesRead   DWORD ?                 
@@ -163,6 +176,7 @@ AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWOR
     LOCAL mainHwnd:DWORD     
     LOCAL hMenu:DWORD
     LOCAL hFileMenu:DWORD
+    LOCAL hEditMenu:DWORD
     LOCAL hFiltMenu:DWORD
 
     mov eax, prevInst
@@ -184,15 +198,18 @@ AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWOR
 
     INVOKE RegisterClassA, ADDR wc
 
+    ; Start with a small default window
     INVOKE CreateWindowExA,
         0, ADDR className, ADDR windowTitle, WS_OVERLAPPEDWINDOW,        
-        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, 0, 0, instHandle, 0
+        CW_USEDEFAULT, CW_USEDEFAULT, 400, 300, 0, 0, instHandle, 0
     mov mainHwnd, eax
 
     INVOKE CreateMenu                       
     mov hMenu, eax
     INVOKE CreatePopupMenu                  
     mov hFileMenu, eax
+    INVOKE CreatePopupMenu                  
+    mov hEditMenu, eax
     INVOKE CreatePopupMenu
     mov hFiltMenu, eax
 
@@ -200,10 +217,14 @@ AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWOR
     INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_SAVE, ADDR saveStr
     INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_EXIT, ADDR exitStr
     
+    INVOKE AppendMenuA, hEditMenu, MF_STRING, IDM_EDIT_ROTATE, ADDR rotStr
+    INVOKE AppendMenuA, hEditMenu, MF_STRING, IDM_EDIT_CROP, ADDR cropStr
+    
     INVOKE AppendMenuA, hFiltMenu, MF_STRING, IDM_FILTER_NEG, ADDR negStr
     INVOKE AppendMenuA, hFiltMenu, MF_STRING, IDM_FILTER_GRAY, ADDR grayStr
     
     INVOKE AppendMenuA, hMenu, MF_POPUP, hFileMenu, ADDR fileMenuStr
+    INVOKE AppendMenuA, hMenu, MF_POPUP, hEditMenu, ADDR editMenuStr
     INVOKE AppendMenuA, hMenu, MF_POPUP, hFiltMenu, ADDR filtMenuStr
     INVOKE SetMenu, mainHwnd, hMenu
 
@@ -272,13 +293,25 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                     add eax, 14
                     mov pHeader, eax
 
+                    ; =====================================================================
+                    ; NEW: DYNAMIC WINDOW RESIZING
+                    ; =====================================================================
+                    ; We want the window to be the image width + 40px for margins
+                    mov eax, imgWidth
+                    add eax, 40
+                    
+                    ; We want the height to be image height + 80px (for title bar + menus)
+                    mov ebx, imgHeight
+                    add ebx, 80
+                    
+                    ; Resize it! (6 = SWP_NOMOVE | SWP_NOZORDER, meaning don't move it, just resize)
+                    INVOKE SetWindowPos, winHandle, 0, 0, 0, eax, ebx, 6
+                    ; =====================================================================
+
                     INVOKE RenderImage, winHandle
                 .ENDIF
             .ENDIF
             
-        ; =====================================================================
-        ; NEW: SAVE FILE TO DISK
-        ; =====================================================================
         .ELSEIF eax == IDM_FILE_SAVE
             .IF pHeap != 0
                 mov szFileName[0], 0
@@ -290,24 +323,26 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                 mov ofn.nMaxFile, 260
                 mov ofn.Flags, OFN_OVERWRITEPROMPT
                 
-                ; Pop up the "Save As" Dialog
                 INVOKE GetSaveFileNameA, ADDR ofn
                 .IF eax != 0
-                    ; Create a BRAND NEW file with Write permissions
                     INVOKE CreateFileA, ADDR szFileName, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0
                     mov hFile, eax
                     
                     .IF eax != INVALID_HANDLE_VALUE
-                        ; Dump our memory buffer (pHeap) straight into the new file
                         INVOKE WriteFile, hFile, pHeap, fileSize, ADDR bytesRead, 0
                         INVOKE CloseHandle, hFile
-                        
-                        ; Alert the user of success!
                         INVOKE MessageBoxA, winHandle, ADDR saveSuccess, ADDR msgTitle, 0
                     .ENDIF
                 .ENDIF
             .ENDIF
             
+        ; --- EDIT MENU PLACEHOLDERS ---
+        .ELSEIF eax == IDM_EDIT_ROTATE
+            INVOKE MessageBoxA, winHandle, ADDR buildMsg, ADDR msgTitle, 0
+            
+        .ELSEIF eax == IDM_EDIT_CROP
+            INVOKE MessageBoxA, winHandle, ADDR buildMsg, ADDR msgTitle, 0
+
         .ELSEIF eax == IDM_FILTER_NEG
             .IF pHeap != 0
                 mov ecx, fileSize
@@ -324,53 +359,41 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
                 INVOKE RenderImage, winHandle
             .ENDIF
 
-        ; =====================================================================
-        ; NEW: THE GRAYSCALE (MATH) FILTER
-        ; =====================================================================
         .ELSEIF eax == IDM_FILTER_GRAY
             .IF pHeap != 0
-                ; 1. Calculate how many pixels we have
                 mov ecx, fileSize
                 sub ecx, pixelOffset
                 
-                ; Divide byte count by 3 to get pixel count
                 mov eax, ecx
                 mov edx, 0
                 mov ebx, 3
                 div ebx
-                mov ecx, eax    ; ECX now holds total pixels
+                mov ecx, eax    
 
                 mov esi, pPixels
                 
             GrayLoop:
-                ; 2. Load the 3 color channels (Using movzx to prevent overflow in AX)
-                movzx ax, BYTE PTR [esi]      ; Blue
-                movzx bx, BYTE PTR [esi+1]    ; Green
-                movzx dx, BYTE PTR [esi+2]    ; Red
+                movzx ax, BYTE PTR [esi]      
+                movzx bx, BYTE PTR [esi+1]    
+                movzx dx, BYTE PTR [esi+2]    
                 
-                ; 3. Add them together (AX = B + G + R)
                 add ax, bx
                 add ax, dx
                 
-                ; 4. Divide by 3 to find the average brightness
                 mov bl, 3
-                div bl          ; AL now contains the average!
+                div bl          
                 
-                ; 5. Write the exact same average back to Blue, Green, and Red
                 mov BYTE PTR [esi], al
                 mov BYTE PTR [esi+1], al
                 mov BYTE PTR [esi+2], al
                 
-                ; 6. Jump forward 3 bytes to the next pixel
                 add esi, 3
                 dec ecx
                 cmp ecx, 0
                 jg GrayLoop
                 
-                ; 7. Redraw!
                 INVOKE RenderImage, winHandle
             .ENDIF
-        ; =====================================================================
 
         .ELSEIF eax == IDM_FILE_EXIT
             INVOKE DestroyWindow, winHandle
