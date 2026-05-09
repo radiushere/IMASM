@@ -2,10 +2,10 @@ INCLUDE Irvine32.inc
 
 ; =========================================================================
 ; 1. WIN32 API CONSTANTS & STRUCTURES
-; (Prefixed with GUI_ to avoid collisions with Irvine's library)
 ; =========================================================================
 WM_DESTROY          EQU 2
 WM_CLOSE            EQU 10h
+WM_COMMAND          EQU 111     
 COLOR_WINDOW        EQU 5
 CS_HREDRAW          EQU 2
 CS_VREDRAW          EQU 1
@@ -15,7 +15,12 @@ SW_SHOW             EQU 5
 IDI_APPLICATION     EQU 32512
 IDC_ARROW           EQU 32512
 
-; Renamed to GUI_WNDCLASS
+MF_STRING           EQU 00000000h
+MF_POPUP            EQU 00000010h
+IDM_FILE_OPEN       EQU 1001    
+IDM_FILE_SAVE       EQU 1002    
+IDM_FILE_EXIT       EQU 1003    
+
 GUI_WNDCLASS STRUCT
   style         DWORD ?
   lpfnWndProc   DWORD ?
@@ -29,7 +34,6 @@ GUI_WNDCLASS STRUCT
   lpszClassName DWORD ?
 GUI_WNDCLASS ENDS
 
-; Renamed to GUI_MSG
 GUI_MSG STRUCT
   hwnd      DWORD ?
   message   DWORD ?
@@ -43,7 +47,9 @@ GUI_MSG ENDS
 ; =========================================================================
 ; 2. WIN32 API PROTOTYPES
 ; =========================================================================
+; FIX: We added GetModuleHandleA back, but left MessageBoxA out!
 GetModuleHandleA PROTO :DWORD
+
 LoadIconA        PROTO :DWORD, :DWORD
 LoadCursorA      PROTO :DWORD, :DWORD
 RegisterClassA   PROTO :DWORD
@@ -56,9 +62,13 @@ DispatchMessageA PROTO :DWORD
 PostQuitMessage  PROTO :DWORD
 DestroyWindow    PROTO :DWORD
 DefWindowProcA   PROTO :DWORD, :DWORD, :DWORD, :DWORD
+CreateMenu       PROTO
+CreatePopupMenu  PROTO
+AppendMenuA      PROTO :DWORD, :DWORD, :DWORD, :DWORD
+SetMenu          PROTO :DWORD, :DWORD
 
-WinMain PROTO :DWORD, :DWORD, :DWORD, :DWORD
-WndProc PROTO :DWORD, :DWORD, :DWORD, :DWORD
+AppWinMain PROTO instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWORD
+AppWndProc PROTO winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
 
 ; =========================================================================
 ; 3. DATA SECTION
@@ -66,9 +76,18 @@ WndProc PROTO :DWORD, :DWORD, :DWORD, :DWORD
 .data
 className   BYTE "IMASM_Class",0
 windowTitle BYTE "IMASM - Professional Image Editor",0
-msg         GUI_MSG <>       ; Using our custom structure
-wc          GUI_WNDCLASS <>  ; Using our custom structure
-hInstance   DWORD ?
+guiMsg      GUI_MSG <>       
+wc          GUI_WNDCLASS <>
+globalInst  DWORD ?          
+
+fileMenuStr BYTE "File",0
+openStr     BYTE "Open Image...",0
+saveStr     BYTE "Save Image...",0
+exitStr     BYTE "Exit",0
+
+openMsg     BYTE "You clicked Open! Soon, this will launch the File Picker.",0
+saveMsg     BYTE "You clicked Save!",0
+msgTitle    BYTE "IMASM Event",0
 
 ; =========================================================================
 ; 4. CODE SECTION
@@ -76,33 +95,31 @@ hInstance   DWORD ?
 .code
 main PROC
     INVOKE GetModuleHandleA, 0
-    mov hInstance, eax
-    INVOKE WinMain, hInstance, 0, 0, SW_SHOW
+    mov globalInst, eax
+    
+    INVOKE AppWinMain, globalInst, 0, 0, SW_SHOW
+    
     INVOKE ExitProcess, eax
 main ENDP
 
-WinMain PROC hInst:DWORD, hPrevInst:DWORD, CmdLine:DWORD, CmdShow:DWORD
-    LOCAL hwnd:DWORD 
+AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWORD
+    LOCAL mainHwnd:DWORD     
+    LOCAL hMenu:DWORD
+    LOCAL hFileMenu:DWORD
 
-    ; --- Fix for the Warnings ---
-    ; We move them into EAX to tell MASM "Yes, we referenced them"
-    mov eax, hPrevInst
-    mov eax, CmdLine
-    ; ----------------------------
+    mov eax, prevInst
+    mov eax, cmdLineStr
 
     mov wc.style, CS_HREDRAW or CS_VREDRAW
-    mov wc.lpfnWndProc, OFFSET WndProc  
+    mov wc.lpfnWndProc, OFFSET AppWndProc  
     mov wc.cbClsExtra, 0
     mov wc.cbWndExtra, 0
-    mov eax, hInst
+    mov eax, instHandle
     mov wc.hInstance, eax
-    
     INVOKE LoadIconA, 0, IDI_APPLICATION
     mov wc.hIcon, eax
-    
     INVOKE LoadCursorA, 0, IDC_ARROW
     mov wc.hCursor, eax
-    
     mov wc.hbrBackground, COLOR_WINDOW + 1  
     mov wc.lpszMenuName, 0
     mov wc.lpszClassName, OFFSET className
@@ -115,39 +132,65 @@ WinMain PROC hInst:DWORD, hPrevInst:DWORD, CmdLine:DWORD, CmdShow:DWORD
         ADDR windowTitle,
         WS_OVERLAPPEDWINDOW,        
         CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, 
-        0, 0, hInst, 0
-    mov hwnd, eax
+        0, 0, instHandle, 0
+    mov mainHwnd, eax
 
-    INVOKE ShowWindow, hwnd, CmdShow
-    INVOKE UpdateWindow, hwnd
+    ; Create Menu
+    INVOKE CreateMenu                       
+    mov hMenu, eax
+    INVOKE CreatePopupMenu                  
+    mov hFileMenu, eax
+
+    INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_OPEN, ADDR openStr
+    INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_SAVE, ADDR saveStr
+    INVOKE AppendMenuA, hFileMenu, MF_STRING, IDM_FILE_EXIT, ADDR exitStr
+    INVOKE AppendMenuA, hMenu, MF_POPUP, hFileMenu, ADDR fileMenuStr
+    INVOKE SetMenu, mainHwnd, hMenu
+
+    INVOKE ShowWindow, mainHwnd, showCmd
+    INVOKE UpdateWindow, mainHwnd
 
 MessageLoop:
-    INVOKE GetMessageA, ADDR msg, 0, 0, 0
+    INVOKE GetMessageA, ADDR guiMsg, 0, 0, 0
     test eax, eax
     je ExitLoop                     
-    INVOKE TranslateMessage, ADDR msg
-    INVOKE DispatchMessageA, ADDR msg
+    INVOKE TranslateMessage, ADDR guiMsg
+    INVOKE DispatchMessageA, ADDR guiMsg
     jmp MessageLoop                 
 
 ExitLoop:
-    mov eax, msg.wParam
+    mov eax, guiMsg.wParam
     ret
-WinMain ENDP
+AppWinMain ENDP
 
-WndProc PROC hWnd:DWORD, uMsg:DWORD, wParam:DWORD, lParam:DWORD
-    .IF uMsg == WM_DESTROY
+AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
+    
+    .IF msgID == WM_COMMAND
+        mov eax, wPrm             
+        
+        .IF ax == IDM_FILE_OPEN
+            INVOKE MessageBoxA, winHandle, ADDR openMsg, ADDR msgTitle, 0
+            
+        .ELSEIF ax == IDM_FILE_SAVE
+            INVOKE MessageBoxA, winHandle, ADDR saveMsg, ADDR msgTitle, 0
+            
+        .ELSEIF ax == IDM_FILE_EXIT
+            INVOKE DestroyWindow, winHandle
+        .ENDIF
+
+    .ELSEIF msgID == WM_DESTROY
         INVOKE PostQuitMessage, 0
         
-    .ELSEIF uMsg == WM_CLOSE
-        INVOKE DestroyWindow, hWnd
+    .ELSEIF msgID == WM_CLOSE
+        INVOKE DestroyWindow, winHandle
 
     .ELSE
-        INVOKE DefWindowProcA, hWnd, uMsg, wParam, lParam
+        INVOKE DefWindowProcA, winHandle, msgID, wPrm, lPrm
         ret
     .ENDIF
 
     xor eax, eax
     ret
-WndProc ENDP
+AppWndProc ENDP
 
 END main
