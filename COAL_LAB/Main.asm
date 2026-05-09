@@ -5,7 +5,7 @@ INCLUDE Irvine32.inc
 ; =========================================================================
 WM_DESTROY          EQU 2
 WM_CLOSE            EQU 10h
-WM_COMMAND          EQU 0111h   ; FIX: Added 'h' for Hexadecimal! 
+WM_COMMAND          EQU 0111h   
 COLOR_WINDOW        EQU 5
 CS_HREDRAW          EQU 2
 CS_VREDRAW          EQU 1
@@ -23,6 +23,12 @@ IDM_FILE_EXIT       EQU 1003
 
 OFN_FILEMUSTEXIST   EQU 00001000h
 OFN_PATHMUSTEXIST   EQU 00000800h
+
+; File I/O Constants 
+GENERIC_READ        EQU 80000000h
+OPEN_EXISTING       EQU 3
+FILE_ATTRIBUTE_NORMAL EQU 80h
+INVALID_HANDLE_VALUE  EQU -1
 
 GUI_WNDCLASS STRUCT
   style         DWORD ?
@@ -91,7 +97,11 @@ CreatePopupMenu  PROTO
 AppendMenuA      PROTO :DWORD, :DWORD, :DWORD, :DWORD
 SetMenu          PROTO :DWORD, :DWORD
 
+; Required because comdlg32.lib provides this, not Irvine
 GetOpenFileNameA PROTO :DWORD
+
+; FIX: Removed CreateFileA, ReadFile, and CloseHandle prototypes! 
+; Irvine32 already provides them for us.
 
 AppWinMain PROTO instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWORD
 AppWndProc PROTO winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
@@ -111,12 +121,22 @@ openStr     BYTE "Open Image...",0
 saveStr     BYTE "Save Image...",0
 exitStr     BYTE "Exit",0
 
-saveMsg     BYTE "You clicked Save!",0
-msgTitle    BYTE "IMASM Event",0
-
 ofn         GUI_OPENFILENAME <>
 szFileName  BYTE 260 DUP(0)      
 szFilter    BYTE "Bitmap Files (*.bmp)",0,"*.bmp",0,"All Files (*.*)",0,"*.*",0,0
+
+; Memory for File Parsing
+hFile       DWORD ?                 
+bytesRead   DWORD ?                 
+bmpHeader   BYTE 54 DUP(0)          
+imgWidth    DWORD ?                 
+imgHeight   DWORD ?                 
+
+; Console Debug Strings
+dbgMsg1     BYTE "--- NEW IMAGE LOADED ---",0
+dbgWidth    BYTE "Width (Pixels): ",0
+dbgHeight   BYTE "Height (Pixels): ",0
+errMsg      BYTE "Failed to open file!",0
 
 ; =========================================================================
 ; 4. CODE SECTION
@@ -193,14 +213,12 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
     
     .IF msgID == WM_COMMAND
         mov eax, wPrm             
-        and eax, 0FFFFh     ; FIX: Safely mask out the top 16 bits to get the pure Button ID
+        and eax, 0FFFFh     
         
         .IF eax == IDM_FILE_OPEN
             
-            ; Initialize the file path to empty before opening picker
             mov szFileName[0], 0
-            
-            mov ofn.lStructSize, 76     ; The exact byte size of the OPENFILENAME struct
+            mov ofn.lStructSize, 76     
             mov eax, winHandle
             mov ofn.hwndOwner, eax
             mov ofn.lpstrFilter, OFFSET szFilter
@@ -211,13 +229,52 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
             INVOKE GetOpenFileNameA, ADDR ofn
             
             .IF eax != 0
-                ; Temporarily show a Message Box proving we captured the file path!
-                INVOKE MessageBoxA, winHandle, ADDR szFileName, ADDR msgTitle, 0
+                ; 1. Ask Windows to open the file we just selected
+                INVOKE CreateFileA, ADDR szFileName, GENERIC_READ, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0
+                mov hFile, eax
+                
+                .IF eax != INVALID_HANDLE_VALUE
+                    
+                    ; 2. Read exactly 54 bytes into our 'bmpHeader' array
+                    INVOKE ReadFile, hFile, ADDR bmpHeader, 54, ADDR bytesRead, 0
+                    
+                    ; 3. Close the file so other programs can use it
+                    INVOKE CloseHandle, hFile
+
+                    ; 4. Extract Width (Offset 18) and Height (Offset 22)
+                    mov eax, DWORD PTR [bmpHeader + 18]
+                    mov imgWidth, eax
+                    
+                    mov eax, DWORD PTR [bmpHeader + 22]
+                    mov imgHeight, eax
+
+                    ; 5. Print the results to the background console window
+                    call Crlf
+                    mov edx, OFFSET dbgMsg1
+                    call WriteString
+                    call Crlf
+
+                    mov edx, OFFSET dbgWidth
+                    call WriteString
+                    mov eax, imgWidth
+                    call WriteDec
+                    call Crlf
+
+                    mov edx, OFFSET dbgHeight
+                    call WriteString
+                    mov eax, imgHeight
+                    call WriteDec
+                    call Crlf
+                    
+                .ELSE
+                    mov edx, OFFSET errMsg
+                    call WriteString
+                    call Crlf
+                .ENDIF
             .ENDIF
             
         .ELSEIF eax == IDM_FILE_SAVE
-            INVOKE MessageBoxA, winHandle, ADDR saveMsg, ADDR msgTitle, 0
-            
+            ; Save button logic goes here later
         .ELSEIF eax == IDM_FILE_EXIT
             INVOKE DestroyWindow, winHandle
         .ENDIF
