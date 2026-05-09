@@ -5,7 +5,7 @@ INCLUDE Irvine32.inc
 ; =========================================================================
 WM_DESTROY          EQU 2
 WM_CLOSE            EQU 10h
-WM_COMMAND          EQU 111     
+WM_COMMAND          EQU 0111h   ; FIX: Added 'h' for Hexadecimal! 
 COLOR_WINDOW        EQU 5
 CS_HREDRAW          EQU 2
 CS_VREDRAW          EQU 1
@@ -20,6 +20,9 @@ MF_POPUP            EQU 00000010h
 IDM_FILE_OPEN       EQU 1001    
 IDM_FILE_SAVE       EQU 1002    
 IDM_FILE_EXIT       EQU 1003    
+
+OFN_FILEMUSTEXIST   EQU 00001000h
+OFN_PATHMUSTEXIST   EQU 00000800h
 
 GUI_WNDCLASS STRUCT
   style         DWORD ?
@@ -44,12 +47,33 @@ GUI_MSG STRUCT
   pt_y      DWORD ?
 GUI_MSG ENDS
 
+GUI_OPENFILENAME STRUCT
+  lStructSize       DWORD ?
+  hwndOwner         DWORD ?
+  hInstance         DWORD ?
+  lpstrFilter       DWORD ?
+  lpstrCustomFilter DWORD ?
+  nMaxCustFilter    DWORD ?
+  nFilterIndex      DWORD ?
+  lpstrFile         DWORD ?
+  nMaxFile          DWORD ?
+  lpstrFileTitle    DWORD ?
+  nMaxFileTitle     DWORD ?
+  lpstrInitialDir   DWORD ?
+  lpstrTitle        DWORD ?
+  Flags             DWORD ?
+  nFileOffset       WORD ?
+  nFileExtension    WORD ?
+  lpstrDefExt       DWORD ?
+  lCustData         DWORD ?
+  lpfnHook          DWORD ?
+  lpTemplateName    DWORD ?
+GUI_OPENFILENAME ENDS
+
 ; =========================================================================
 ; 2. WIN32 API PROTOTYPES
 ; =========================================================================
-; FIX: We added GetModuleHandleA back, but left MessageBoxA out!
 GetModuleHandleA PROTO :DWORD
-
 LoadIconA        PROTO :DWORD, :DWORD
 LoadCursorA      PROTO :DWORD, :DWORD
 RegisterClassA   PROTO :DWORD
@@ -66,6 +90,8 @@ CreateMenu       PROTO
 CreatePopupMenu  PROTO
 AppendMenuA      PROTO :DWORD, :DWORD, :DWORD, :DWORD
 SetMenu          PROTO :DWORD, :DWORD
+
+GetOpenFileNameA PROTO :DWORD
 
 AppWinMain PROTO instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWORD
 AppWndProc PROTO winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
@@ -85,9 +111,12 @@ openStr     BYTE "Open Image...",0
 saveStr     BYTE "Save Image...",0
 exitStr     BYTE "Exit",0
 
-openMsg     BYTE "You clicked Open! Soon, this will launch the File Picker.",0
 saveMsg     BYTE "You clicked Save!",0
 msgTitle    BYTE "IMASM Event",0
+
+ofn         GUI_OPENFILENAME <>
+szFileName  BYTE 260 DUP(0)      
+szFilter    BYTE "Bitmap Files (*.bmp)",0,"*.bmp",0,"All Files (*.*)",0,"*.*",0,0
 
 ; =========================================================================
 ; 4. CODE SECTION
@@ -96,9 +125,7 @@ msgTitle    BYTE "IMASM Event",0
 main PROC
     INVOKE GetModuleHandleA, 0
     mov globalInst, eax
-    
     INVOKE AppWinMain, globalInst, 0, 0, SW_SHOW
-    
     INVOKE ExitProcess, eax
 main ENDP
 
@@ -135,7 +162,6 @@ AppWinMain PROC instHandle:DWORD, prevInst:DWORD, cmdLineStr:DWORD, showCmd:DWOR
         0, 0, instHandle, 0
     mov mainHwnd, eax
 
-    ; Create Menu
     INVOKE CreateMenu                       
     mov hMenu, eax
     INVOKE CreatePopupMenu                  
@@ -167,14 +193,32 @@ AppWndProc PROC winHandle:DWORD, msgID:DWORD, wPrm:DWORD, lPrm:DWORD
     
     .IF msgID == WM_COMMAND
         mov eax, wPrm             
+        and eax, 0FFFFh     ; FIX: Safely mask out the top 16 bits to get the pure Button ID
         
-        .IF ax == IDM_FILE_OPEN
-            INVOKE MessageBoxA, winHandle, ADDR openMsg, ADDR msgTitle, 0
+        .IF eax == IDM_FILE_OPEN
             
-        .ELSEIF ax == IDM_FILE_SAVE
+            ; Initialize the file path to empty before opening picker
+            mov szFileName[0], 0
+            
+            mov ofn.lStructSize, 76     ; The exact byte size of the OPENFILENAME struct
+            mov eax, winHandle
+            mov ofn.hwndOwner, eax
+            mov ofn.lpstrFilter, OFFSET szFilter
+            mov ofn.lpstrFile, OFFSET szFileName
+            mov ofn.nMaxFile, 260
+            mov ofn.Flags, OFN_FILEMUSTEXIST or OFN_PATHMUSTEXIST
+            
+            INVOKE GetOpenFileNameA, ADDR ofn
+            
+            .IF eax != 0
+                ; Temporarily show a Message Box proving we captured the file path!
+                INVOKE MessageBoxA, winHandle, ADDR szFileName, ADDR msgTitle, 0
+            .ENDIF
+            
+        .ELSEIF eax == IDM_FILE_SAVE
             INVOKE MessageBoxA, winHandle, ADDR saveMsg, ADDR msgTitle, 0
             
-        .ELSEIF ax == IDM_FILE_EXIT
+        .ELSEIF eax == IDM_FILE_EXIT
             INVOKE DestroyWindow, winHandle
         .ENDIF
 
